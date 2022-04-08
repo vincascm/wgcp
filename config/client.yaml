@@ -1,0 +1,5 @@
+server_address: ws://127.0.0.1:5465/
+listen: false
+network: default
+id: 2
+peer_id: 3
