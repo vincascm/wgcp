@@ -13,6 +13,7 @@ pub struct Config {
     pub network: String,
     pub id: String,
     pub peer_id: String,
+    pub persistent_keepalive: u8,
 }
 
 impl Config {

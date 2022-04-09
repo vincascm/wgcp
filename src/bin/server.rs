@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use anyhow::Result;
 use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
@@ -7,7 +7,6 @@ use log::error;
 use tokio::{
     net::{TcpListener, TcpStream, UdpSocket},
     sync::Mutex,
-    time::sleep,
 };
 use tokio_tungstenite::{accept_async, tungstenite::Message as WsMessage, WebSocketStream};
 
@@ -72,44 +71,6 @@ struct NetWork {
 #[derive(Debug)]
 struct Peer {
     tx: Option<UnboundedSender<Message>>,
-}
-
-/*
-async fn get_endpoint(network: &str, public_key: &str) -> Result<Option<String>> {
-      let output = Command::new("wg")
-        .arg("show")
-        .arg("wg0")
-        .arg("endpoints")
-        .output().await?;
-      if output.status.success() {
-          let output = String::from_utf8_lossy(&output.stdout);
-          let endpoints = output
-              .split('\n');
-          for i in endpoints {
-              let row: Vec<_> = i.split('\t').collect();
-              if row[0] == public_key {
-                  return Ok(Some(row[1].to_string()))
-              }
-          }
-          Ok(None)
-      } else {
-          Err(anyhow!("execute wg command failure"))
-      }
-}
-*/
-
-async fn send_ping(sock: Arc<UdpSocket>, addr: SocketAddr) -> Result<()> {
-    let mut count = 0;
-    loop {
-        if count > 10 {
-            break;
-        }
-        let resp = Request::Ping.into_message();
-        sock.send_to(&resp.se()?, addr).await?;
-        sleep(Duration::from_secs(1)).await;
-        count += 1;
-    }
-    Ok(())
 }
 
 async fn broker_handler(mut broker: Broker) -> Result<()> {

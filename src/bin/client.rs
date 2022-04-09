@@ -16,37 +16,8 @@ use url::Url;
 use wgcp::{
     config::client::CONFIG,
     message::{error::Error as MessageError, request::Request, response::Response, Message, Peer},
+    wg,
 };
-
-async fn connect_to_peer(sock: Arc<UdpSocket>, addr: SocketAddr, mut count: usize) -> Result<bool> {
-    dbg!("connect_to_peer");
-    sock.connect(addr).await?;
-    let mut buf = [0; 1024];
-    loop {
-        if count == 0 {
-            break;
-        }
-        let req = Request::Connect(Peer {
-            network: CONFIG.network.to_string(),
-            id: CONFIG.id.to_string(),
-        })
-        .into_message();
-        sock.send(&req.se()?).await?;
-        sock.try_recv(&mut buf).ok();
-        let msg = Message::de(&buf)?;
-        match msg {
-            Message::Request(_) => (),
-            Message::Response(response) => match response {
-                Response::Connected => return Ok(true),
-                _ => (),
-            },
-            Message::Err(e) => error!("peer error: {e:?}"),
-        }
-        count -= 1;
-        sleep(Duration::from_secs(1)).await;
-    }
-    Ok(false)
-}
 
 async fn broker_handler(broker: SocketAddr) -> Result<()> {
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
@@ -65,10 +36,6 @@ async fn broker_handler(broker: SocketAddr) -> Result<()> {
         dbg!(&msg);
         match msg {
             Message::Request(request) => match request {
-                Request::Connect(_) => {
-                    let resp = Response::Connected.into_message();
-                    sock.send(&resp.se()?).await?;
-                }
                 Request::Ping => {
                     let resp = Response::Pong.into_message();
                     sock.send(&resp.se()?).await?;
@@ -76,14 +43,10 @@ async fn broker_handler(broker: SocketAddr) -> Result<()> {
                 _ => (),
             },
             Message::Response(response) => match response {
-                Response::Addr { addr, .. } => {
-                    let resp = Response::Wait.into_message();
+                Response::Addr { peer, addr } => {
+                    wg::set_endpoint(peer, addr, CONFIG.persistent_keepalive).await?;
+                    let resp = Response::Complete.into_message();
                     sock.send(&resp.se()?).await?;
-                    if connect_to_peer(sock.clone(), addr, 10).await? {
-                        let resp = Response::Complete.into_message();
-                        sock.send(&resp.se()?).await?;
-                    }
-                    error!("connect to peer {addr:?} failure");
                 }
                 _ => (),
             },
