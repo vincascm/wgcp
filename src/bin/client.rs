@@ -1,12 +1,13 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::net::SocketAddr;
 
 use anyhow::Result;
 use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
-use log::error;
+use log::{error, warn};
 use tokio::{
     net::{TcpStream, UdpSocket},
-    time::sleep,
+    spawn,
+    select,
 };
 use tokio_tungstenite::{
     connect_async, tungstenite::Message as WsMessage, MaybeTlsStream, WebSocketStream,
@@ -15,38 +16,44 @@ use url::Url;
 
 use wgcp::{
     config::client::CONFIG,
-    message::{error::Error as MessageError, request::Request, response::Response, Message, Peer},
+    message::{request::Request, response::Response, Message, Peer},
     wg,
 };
 
-async fn broker_handler(broker: SocketAddr) -> Result<()> {
-    let sock = UdpSocket::bind("0.0.0.0:0").await?;
-    let sock = Arc::new(sock);
-    sock.connect(broker).await?;
+/// return local addr, peer id, peer addr 
+async fn get_peer_with_broker(broker: SocketAddr) -> Result<(SocketAddr, Peer, SocketAddr)> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let bind_addr: SocketAddr = "0.0.0.0:0".parse()?;
+    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    sock.bind(&bind_addr.into())?;
+    sock.set_reuse_port(true)?;
+    sock.set_reuse_address(true)?;
+    let sock: std::net::UdpSocket = sock.into();
+    let sock = UdpSocket::from_std(sock)?;
+    let local_addr = sock.local_addr()?;
     let req = Request::Connect(Peer {
         network: CONFIG.network.to_string(),
         id: CONFIG.id.to_string(),
     })
     .into_message();
-    sock.send(&req.se()?).await?;
+    sock.send_to(&req.se()?, broker).await?;
     let mut buf = [0; 1024];
     loop {
-        sock.recv(&mut buf).await?;
+        let (_, sock_addr) = sock.recv_from(&mut buf).await?;
         let msg = Message::de(&buf)?;
-        dbg!(&msg);
         match msg {
             Message::Request(request) => match request {
                 Request::Ping => {
                     let resp = Response::Pong.into_message();
-                    sock.send(&resp.se()?).await?;
+                    sock.send_to(&resp.se()?, sock_addr).await?;
                 }
                 _ => (),
             },
             Message::Response(response) => match response {
                 Response::Addr { peer, addr } => {
-                    wg::set_endpoint(peer, addr, CONFIG.persistent_keepalive).await?;
                     let resp = Response::Complete.into_message();
-                    sock.send(&resp.se()?).await?;
+                    sock.send_to(&resp.se()?, sock_addr).await?;
+                    return Ok((local_addr, peer, addr));
                 }
                 _ => (),
             },
@@ -55,15 +62,9 @@ async fn broker_handler(broker: SocketAddr) -> Result<()> {
     }
 }
 
-async fn broker_listen(broker: SocketAddr) {
-    if let Err(e) = broker_handler(broker).await {
-        error!("broker error: {e}");
-    }
-}
-
-async fn handle_message(msg: WsMessage, tx: UnboundedSender<Message>) -> Result<()> {
+/// return true: success
+async fn handle_message(msg: WsMessage, tx: UnboundedSender<Message>, wg_tx: UnboundedSender<()>) -> Result<bool> {
     let msg = msg.try_into()?;
-    dbg!(&msg);
     match msg {
         Message::Request(request) => match request {
             Request::Ping => Response::Pong.into_message().send(&tx)?,
@@ -71,19 +72,24 @@ async fn handle_message(msg: WsMessage, tx: UnboundedSender<Message>) -> Result<
         },
         Message::Response(response) => match response {
             Response::Broker(broker) => {
-                tokio::spawn(broker_listen(broker));
+                spawn(async move {
+                    match get_peer_with_broker(broker).await {
+                        Ok((local_addr, peer, addr)) => {
+                            if let Err(e) = wg::set(local_addr, peer, addr, CONFIG.persistent_keepalive).await {
+                                error!("wg set error: {e}");
+                            }
+                            wg_tx.unbounded_send(()).ok();
+                        },
+                        Err(e) => error!("get_peer_with_broker error: {e}"),
+                    }
+                });
+                return Ok(true);
             }
             _ => (),
         },
-        Message::Err(e) => match e {
-            MessageError::PeerOffline => {
-                sleep(Duration::from_secs(3)).await;
-                punch_to(&tx)?;
-            }
-            e => error!("server error: {e:?}"),
-        },
+        Message::Err(e) => error!("ws server error: {e:?}"),
     }
-    Ok(())
+    Ok(false)
 }
 
 async fn send_ws_message(
@@ -121,12 +127,16 @@ async fn main() -> Result<()> {
         std::env::set_var("CONFIG_FILE", filename);
     }
 
+    if CONFIG.persistent_keepalive > 25 {
+        warn!("persistent-keepalive is large than 25s, may result in NAT close rule map");
+    }
+
     let server_address: Url = CONFIG.server_address.parse()?;
     let (ws, _) = connect_async(server_address).await?;
     let (write, mut read) = ws.split();
     let (tx, rx) = unbounded();
 
-    tokio::spawn(send_ws_message(write, rx));
+    spawn(send_ws_message(write, rx));
 
     Request::Connect(Peer {
         network: CONFIG.network.to_string(),
@@ -138,8 +148,18 @@ async fn main() -> Result<()> {
     if !CONFIG.listen {
         punch_to(&tx)?;
     }
-    while let Some(msg) = read.next().await {
-        handle_message(msg?, tx.clone()).await?;
+    let (wg_tx, mut wg_rx) = unbounded();
+    loop {
+        select! {
+            msg = read.next() => {
+                if let Some(msg) = msg {
+                    handle_message(msg?, tx.clone(), wg_tx.clone()).await?;
+                }
+            },
+            _ = wg_rx.next() => {
+                break;
+            },
+        }
     }
     Ok(())
 }

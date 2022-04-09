@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
@@ -7,6 +7,7 @@ use log::error;
 use tokio::{
     net::{TcpListener, TcpStream, UdpSocket},
     sync::Mutex,
+    time::sleep,
 };
 use tokio_tungstenite::{accept_async, tungstenite::Message as WsMessage, WebSocketStream};
 
@@ -23,19 +24,6 @@ struct NetWorks {
 }
 
 impl NetWorks {
-    /*
-    async fn get_or_update(&mut self, network: &str, public_key: &str) -> Result<Option<String>> {
-        let endpoint = get_endpoint(network, public_key).await?;
-        self.inner.entry(network.to_string()).and_modify(|i| {
-            i.peers.entry(public_key.to_string())
-                .and_modify(|i| *i = endpoint.clone())
-                .or_insert(endpoint.clone());
-        })
-        .or_insert(Default::default());
-        Ok(endpoint)
-    }
-    */
-
     fn get(&self, network: &str, peer_id: &str) -> Result<Option<&Peer>> {
         let endpoint = self.inner.get(network).and_then(|i| i.peers.get(peer_id));
         Ok(endpoint)
@@ -135,7 +123,10 @@ async fn broker_handler(mut broker: Broker) -> Result<()> {
                 },
             },
             Message::Response(response) => match response {
-                Response::Complete => break,
+                Response::Complete => {
+                    sleep(Duration::from_secs(60)).await;
+                    break;
+                }
                 _ => (),
             },
             Message::Err(e) => error!("client error: {e:?}"),
