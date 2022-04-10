@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
@@ -6,7 +6,9 @@ use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 use log::{error, info};
 use tokio::{
     net::{TcpListener, TcpStream, UdpSocket},
+    select,
     sync::Mutex,
+    time::sleep,
 };
 use tokio_tungstenite::{accept_async, tungstenite::Message as WsMessage, WebSocketStream};
 
@@ -72,67 +74,74 @@ async fn broker_handler(mut broker: Broker) -> Result<()> {
     let sock = Arc::new(sock);
     let mut buf = [0; 1024];
     loop {
-        let (_, addr) = sock.recv_from(&mut buf).await?;
-        let msg = Message::de(&buf)?;
-        dbg!(&msg);
-        match msg {
-            Message::Request(request) => match request {
-                Request::Ping => {
-                    let resp = Response::Pong.into_message();
-                    sock.send_to(&resp.se()?, addr).await?;
-                }
-                Request::Connect(peer) => {
-                    broker.networks.insert(peer.clone(), addr);
-                    match broker.task.get(&peer) {
-                        Some(remote_peer_id) => match broker.networks.get(remote_peer_id) {
-                            Some(remote_addr) => {
+        select! {
+            r = sock.recv_from(&mut buf) => {
+                let (_, addr) = r?;
+                let msg = Message::de(&buf)?;
+                dbg!(&msg);
+                match msg {
+                    Message::Request(request) => match request {
+                        Request::Ping => {
+                            let resp = Response::Pong.into_message();
+                            sock.send_to(&resp.se()?, addr).await?;
+                        }
+                        Request::Connect(peer) => {
+                            broker.networks.insert(peer.clone(), addr);
+                            match broker.task.get(&peer) {
+                                Some(remote_peer_id) => match broker.networks.get(remote_peer_id) {
+                                    Some(remote_addr) => {
+                                        let resp = Response::Addr {
+                                            peer: remote_peer_id.clone(),
+                                            addr: *remote_addr,
+                                        }
+                                        .into_message();
+                                        sock.send_to(&resp.se()?, addr).await?;
+                                        let remote_resp = Response::Addr {
+                                            peer: peer.clone(),
+                                            addr,
+                                        }
+                                        .into_message();
+                                        sock.send_to(&remote_resp.se()?, remote_addr).await?;
+                                    }
+                                    None => {
+                                        let resp = Response::Wait.into_message();
+                                        sock.send_to(&resp.se()?, addr).await?;
+                                    }
+                                },
+                                None => {
+                                    let resp = MessageError::UnSupportedMessage.into_message();
+                                    sock.send_to(&resp.se()?, addr).await?;
+                                }
+                            }
+                        }
+                        Request::PunchTo { to, .. } => match broker.networks.get(&to) {
+                            Some(addr) => {
                                 let resp = Response::Addr {
-                                    peer: remote_peer_id.clone(),
-                                    addr: *remote_addr,
+                                    peer: to,
+                                    addr: *addr,
                                 }
                                 .into_message();
                                 sock.send_to(&resp.se()?, addr).await?;
-                                let remote_resp = Response::Addr {
-                                    peer: peer.clone(),
-                                    addr,
-                                }
-                                .into_message();
-                                sock.send_to(&remote_resp.se()?, remote_addr).await?;
                             }
                             None => {
-                                let resp = Response::Wait.into_message();
+                                let resp = MessageError::PeerOffline.into_message();
                                 sock.send_to(&resp.se()?, addr).await?;
                             }
                         },
-                        None => {
-                            let resp = MessageError::UnSupportedMessage.into_message();
-                            sock.send_to(&resp.se()?, addr).await?;
-                        }
-                    }
+                    },
+                    Message::Response(response) => match response {
+                        Response::Complete => (),
+                        _ => (),
+                    },
+                    Message::Close => (),
+                    Message::Err(e) => error!("client error: {e:?}"),
                 }
-                Request::PunchTo { to, .. } => match broker.networks.get(&to) {
-                    Some(addr) => {
-                        let resp = Response::Addr {
-                            peer: to,
-                            addr: *addr,
-                        }
-                        .into_message();
-                        sock.send_to(&resp.se()?, addr).await?;
-                    }
-                    None => {
-                        let resp = MessageError::PeerOffline.into_message();
-                        sock.send_to(&resp.se()?, addr).await?;
-                    }
-                },
             },
-            Message::Response(response) => match response {
-                Response::Complete => (),
-                _ => (),
+            _ = sleep(Duration::from_secs(300)) => {
+                //break;
             },
-            Message::Err(e) => error!("client error: {e:?}"),
         }
     }
-    Ok(())
 }
 
 struct Broker {
@@ -147,7 +156,10 @@ async fn handle_message(
     msg: WsMessage,
     tx: UnboundedSender<Message>,
 ) -> Result<()> {
-    let msg = msg.try_into()?;
+    let msg = match msg {
+        WsMessage::Close(_) => return Ok(()),
+        x => x.try_into()?,
+    };
     dbg!(&msg);
     match msg {
         Message::Request(request) => match request {
@@ -173,6 +185,7 @@ async fn handle_message(
             }
         },
         Message::Response(_) => (),
+        Message::Close => (),
         Message::Err(e) => {
             error!("client error: {e:?}");
         }

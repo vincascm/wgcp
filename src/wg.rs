@@ -1,17 +1,15 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, process::Command};
 
 use anyhow::{anyhow, Result};
-use tokio::process::Command;
 
 use crate::message::Peer;
 
-pub async fn get_listen_port(peer: Peer) -> Result<u16> {
+pub fn get_listen_port(peer: Peer) -> Result<u16> {
     let output = Command::new("wg")
         .arg("show")
         .arg("wg0")
         .arg("listen-port")
-        .output()
-        .await?;
+        .output()?;
     if output.status.success() {
         let output = String::from_utf8_lossy(&output.stdout);
         Ok(output.trim().parse()?)
@@ -20,7 +18,7 @@ pub async fn get_listen_port(peer: Peer) -> Result<u16> {
     }
 }
 
-pub async fn set(peer: Peer, addr: SocketAddr, persistent_keepalive: u8) -> Result<()> {
+pub fn set(peer: Peer, addr: SocketAddr, persistent_keepalive: u8) -> Result<()> {
     let status = Command::new("wg")
         .arg("set")
         .arg("wg0")
@@ -30,8 +28,7 @@ pub async fn set(peer: Peer, addr: SocketAddr, persistent_keepalive: u8) -> Resu
         .arg(addr.to_string())
         .arg("persistent-keepalive")
         .arg(persistent_keepalive.to_string())
-        .status()
-        .await?;
+        .status()?;
     if status.success() {
         Ok(())
     } else {

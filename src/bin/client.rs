@@ -1,6 +1,7 @@
 use std::{
     mem::transmute,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    time::Duration,
 };
 
 use anyhow::{bail, Result};
@@ -8,7 +9,7 @@ use bytes::BufMut;
 use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 use log::{error, warn};
-use tokio::{net::TcpStream, select, spawn};
+use tokio::{net::TcpStream, select, spawn, time::sleep};
 use tokio_tungstenite::{
     connect_async, tungstenite::Message as WsMessage, MaybeTlsStream, WebSocketStream,
 };
@@ -51,7 +52,7 @@ impl Udp {
 }
 
 /// return local addr, peer id, peer addr
-async fn get_peer_with_broker(broker: SocketAddr) -> Result<(Peer, SocketAddr)> {
+fn get_peer_with_broker(broker: SocketAddr) -> Result<(Peer, SocketAddr)> {
     use socket2::{Domain, Protocol, Socket, Type};
 
     let broker_ip: Ipv4Addr = match broker.ip() {
@@ -59,7 +60,7 @@ async fn get_peer_with_broker(broker: SocketAddr) -> Result<(Peer, SocketAddr)> 
         IpAddr::V6(_) => bail!("invalid broker ip, must be ipv4"),
     };
     let broker_port = broker.port();
-    let wg_port = wg::get_listen_port(me()).await?;
+    let wg_port = wg::get_listen_port(me())?;
 
     let sock = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::UDP))?;
     sock.set_reuse_port(true)?;
@@ -73,6 +74,7 @@ async fn get_peer_with_broker(broker: SocketAddr) -> Result<(Peer, SocketAddr)> 
     let mut buf = vec![0u8; 1024];
     loop {
         let (_, sock_addr) = sock.recv_from(unsafe { transmute(buf.as_mut_slice()) })?;
+        // skip ip header and udp header, total 28 bytes
         let msg = Message::de(&buf[28..])?;
         dbg!(&msg);
         match msg {
@@ -85,6 +87,7 @@ async fn get_peer_with_broker(broker: SocketAddr) -> Result<(Peer, SocketAddr)> 
                 }
                 _ => (),
             },
+            Message::Close => (),
             Message::Err(e) => error!("broker error: {e:?}"),
         }
     }
@@ -95,7 +98,7 @@ async fn handle_message(
     msg: WsMessage,
     tx: UnboundedSender<Message>,
     wg_tx: UnboundedSender<()>,
-) -> Result<bool> {
+) -> Result<()> {
     let msg = msg.try_into()?;
     dbg!(&msg);
     match msg {
@@ -105,24 +108,24 @@ async fn handle_message(
         },
         Message::Response(response) => match response {
             Response::Broker(broker) => {
-                spawn(async move {
-                    match get_peer_with_broker(broker).await {
+                tokio::task::spawn_blocking(move || {
+                    match get_peer_with_broker(broker) {
                         Ok((peer, addr)) => {
-                            if let Err(e) = wg::set(peer, addr, CONFIG.persistent_keepalive).await {
+                            if let Err(e) = wg::set(peer, addr, CONFIG.persistent_keepalive) {
                                 error!("wg set error: {e}");
                             }
-                            wg_tx.unbounded_send(()).ok();
                         }
                         Err(e) => error!("get_peer_with_broker error: {e}"),
                     }
+                    wg_tx.unbounded_send(()).ok();
                 });
-                return Ok(true);
             }
             _ => (),
         },
+        Message::Close => (),
         Message::Err(e) => error!("ws server error: {e:?}"),
     }
-    Ok(false)
+    Ok(())
 }
 
 async fn send_ws_message(
@@ -130,7 +133,10 @@ async fn send_ws_message(
     mut rx: UnboundedReceiver<Message>,
 ) -> Result<()> {
     while let Some(msg) = rx.next().await {
-        let msg = msg.try_into()?;
+        let msg = match msg {
+            Message::Close => WsMessage::Close(None),
+            x => x.try_into()?,
+        };
         ws_write.send(msg).await?;
     }
     Ok(())
@@ -160,6 +166,9 @@ async fn main() -> Result<()> {
     if CONFIG.persistent_keepalive > 25 {
         warn!("persistent-keepalive is large than 25s, may result in NAT close rule map");
     }
+    if !(CONFIG.network.len() <= 64 && CONFIG.id.len() <= 64 && CONFIG.peer_id.len() <= 64) {
+        bail!("netork, id, or peer_id is too long in config");
+    }
 
     let server_address: Url = CONFIG.server_address.parse()?;
     let (ws, _) = connect_async(server_address).await?;
@@ -183,6 +192,8 @@ async fn main() -> Result<()> {
             },
             _ = wg_rx.next() => {
                 if !CONFIG.listen {
+                    tx.unbounded_send(Message::Close)?;
+                    sleep(Duration::from_secs(1)).await;
                     break;
                 }
             },

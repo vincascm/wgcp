@@ -11,6 +11,7 @@ use super::{request::Request, response::Response};
 pub enum Message {
     Request(Request),
     Response(Response),
+    Close,
     Err(super::error::Error),
 }
 
