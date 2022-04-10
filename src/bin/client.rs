@@ -60,7 +60,7 @@ fn get_peer_with_broker(broker: SocketAddr) -> Result<(Peer, SocketAddr)> {
         IpAddr::V6(_) => bail!("invalid broker ip, must be ipv4"),
     };
     let broker_port = broker.port();
-    let wg_port = wg::get_listen_port(me())?;
+    let wg_port = wg::get_listen_port()?;
 
     let sock = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::UDP))?;
     sock.set_reuse_port(true)?;

@@ -10,6 +10,8 @@ pub static CONFIG: Lazy<Config> = Lazy::new(|| Config::from_env().unwrap());
 pub struct Config {
     pub server_address: String,
     pub listen: bool,
+    /// WireGuard interface
+    pub interface: String,
     pub network: String,
     pub id: String,
     pub peer_id: String,
