@@ -2,12 +2,12 @@ use std::{net::SocketAddr, process::Command};
 
 use anyhow::{anyhow, Result};
 
-use crate::{config::client::CONFIG, message::Peer};
+use crate::message::Peer;
 
-pub fn get_listen_port() -> Result<u16> {
+pub fn get_listen_port(interface: &str) -> Result<u16> {
     let output = Command::new("wg")
         .arg("show")
-        .arg(&CONFIG.interface)
+        .arg(interface)
         .arg("listen-port")
         .output()?;
     if output.status.success() {
@@ -18,10 +18,10 @@ pub fn get_listen_port() -> Result<u16> {
     }
 }
 
-pub fn set(peer: Peer, addr: SocketAddr, persistent_keepalive: u8) -> Result<()> {
+pub fn set(interface: &str, peer: Peer, addr: SocketAddr, persistent_keepalive: u8) -> Result<()> {
     let status = Command::new("wg")
         .arg("set")
-        .arg(&CONFIG.interface)
+        .arg(interface)
         .arg("peer")
         .arg(peer.id)
         .arg("endpoint")

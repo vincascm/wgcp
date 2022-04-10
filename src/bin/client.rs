@@ -9,6 +9,7 @@ use bytes::BufMut;
 use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 use log::{error, warn};
+use once_cell::sync::Lazy;
 use tokio::{net::TcpStream, select, spawn, time::sleep};
 use tokio_tungstenite::{
     connect_async, tungstenite::Message as WsMessage, MaybeTlsStream, WebSocketStream,
@@ -16,11 +17,13 @@ use tokio_tungstenite::{
 use url::Url;
 
 use wgcp::{
-    config::client::CONFIG,
+    config::client::Config,
     message::{request::Request, response::Response, Message, Peer},
     socket_filter::broker_response_filter,
     wg,
 };
+
+static CONFIG: Lazy<Config> = Lazy::new(|| Config::from_env().unwrap());
 
 fn me() -> Peer {
     Peer {
@@ -60,7 +63,7 @@ fn get_peer_with_broker(broker: SocketAddr) -> Result<(Peer, SocketAddr)> {
         IpAddr::V6(_) => bail!("invalid broker ip, must be ipv4"),
     };
     let broker_port = broker.port();
-    let wg_port = wg::get_listen_port()?;
+    let wg_port = wg::get_listen_port(&CONFIG.interface)?;
 
     let sock = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::UDP))?;
     sock.set_reuse_port(true)?;
@@ -82,7 +85,16 @@ fn get_peer_with_broker(broker: SocketAddr) -> Result<(Peer, SocketAddr)> {
             Message::Response(response) => match response {
                 Response::Addr { peer, addr } => {
                     let resp = Response::Complete.into_message();
-                    sock.send_to(&udp.packet(&resp.se()?), &sock_addr)?;
+                    let resp = resp.se()?;
+                    sock.send_to(&udp.packet(&resp), &sock_addr)?;
+
+                    // send 2 ping packet to peer
+                    let udp = Udp::new(wg_port, addr.port());
+                    let resp = Request::Ping.into_message();
+                    let resp = resp.se()?;
+                    sock.send_to(&udp.packet(&resp), &addr.into())?;
+                    std::thread::sleep(Duration::from_secs(1));
+                    sock.send_to(&udp.packet(&resp), &addr.into())?;
                     return Ok((peer, addr));
                 }
                 _ => (),
@@ -111,7 +123,9 @@ async fn handle_message(
                 tokio::task::spawn_blocking(move || {
                     match get_peer_with_broker(broker) {
                         Ok((peer, addr)) => {
-                            if let Err(e) = wg::set(peer, addr, CONFIG.persistent_keepalive) {
+                            if let Err(e) =
+                                wg::set(&CONFIG.interface, peer, addr, CONFIG.persistent_keepalive)
+                            {
                                 error!("wg set error: {e}");
                             }
                         }

@@ -4,6 +4,7 @@ use anyhow::Result;
 use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 use log::{error, info};
+use once_cell::sync::Lazy;
 use tokio::{
     net::{TcpListener, TcpStream, UdpSocket},
     select,
@@ -13,11 +14,13 @@ use tokio::{
 use tokio_tungstenite::{accept_async, tungstenite::Message as WsMessage, WebSocketStream};
 
 use wgcp::{
-    config::server::CONFIG,
+    config::server::Config,
     message::{
         error::Error as MessageError, request::Request, response::Response, Message, Peer as PeerId,
     },
 };
+
+static CONFIG: Lazy<Config> = Lazy::new(|| Config::from_env().unwrap());
 
 #[derive(Default, Debug)]
 struct NetWorks {
