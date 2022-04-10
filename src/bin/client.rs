@@ -1,14 +1,14 @@
-use std::net::SocketAddr;
+use std::{
+    mem::transmute,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
+use bytes::BufMut;
 use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 use log::{error, warn};
-use tokio::{
-    net::{TcpStream, UdpSocket},
-    spawn,
-    select,
-};
+use tokio::{net::TcpStream, select, spawn};
 use tokio_tungstenite::{
     connect_async, tungstenite::Message as WsMessage, MaybeTlsStream, WebSocketStream,
 };
@@ -17,43 +17,71 @@ use url::Url;
 use wgcp::{
     config::client::CONFIG,
     message::{request::Request, response::Response, Message, Peer},
+    socket_filter::broker_response_filter,
     wg,
 };
 
-/// return local addr, peer id, peer addr 
-async fn get_peer_with_broker(broker: SocketAddr) -> Result<(SocketAddr, Peer, SocketAddr)> {
-    use socket2::{Domain, Protocol, Socket, Type};
-    let bind_addr: SocketAddr = "0.0.0.0:0".parse()?;
-    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    sock.bind(&bind_addr.into())?;
-    sock.set_reuse_port(true)?;
-    sock.set_reuse_address(true)?;
-    let sock: std::net::UdpSocket = sock.into();
-    let sock = UdpSocket::from_std(sock)?;
-    let local_addr = sock.local_addr()?;
-    let req = Request::Connect(Peer {
+fn me() -> Peer {
+    Peer {
         network: CONFIG.network.to_string(),
         id: CONFIG.id.to_string(),
-    })
-    .into_message();
-    sock.send_to(&req.se()?, broker).await?;
-    let mut buf = [0; 1024];
+    }
+}
+
+struct Udp {
+    src: u16,
+    dest: u16,
+}
+
+impl Udp {
+    fn new(src: u16, dest: u16) -> Self {
+        Udp { src, dest }
+    }
+
+    fn packet(&self, v: &[u8]) -> Vec<u8> {
+        let len = 8 + v.len();
+        let mut b = Vec::new();
+        b.put_u16(self.src);
+        b.put_u16(self.dest);
+        b.put_u16(len as u16);
+        b.put_u16(0);
+        b.put(v);
+        b
+    }
+}
+
+/// return local addr, peer id, peer addr
+async fn get_peer_with_broker(broker: SocketAddr) -> Result<(Peer, SocketAddr)> {
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    let broker_ip: Ipv4Addr = match broker.ip() {
+        IpAddr::V4(v) => v,
+        IpAddr::V6(_) => bail!("invalid broker ip, must be ipv4"),
+    };
+    let broker_port = broker.port();
+    let wg_port = wg::get_listen_port(me()).await?;
+
+    let sock = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::UDP))?;
+    sock.set_reuse_port(true)?;
+    sock.set_reuse_address(true)?;
+    sock.attach_filter(&broker_response_filter(broker_ip, broker_port, wg_port))?;
+
+    let udp = Udp::new(wg_port, broker_port);
+
+    let req = Request::Connect(me()).into_message().se()?;
+    sock.send_to(&udp.packet(&req), &broker.into())?;
+    let mut buf = vec![0u8; 1024];
     loop {
-        let (_, sock_addr) = sock.recv_from(&mut buf).await?;
-        let msg = Message::de(&buf)?;
+        let (_, sock_addr) = sock.recv_from(unsafe { transmute(buf.as_mut_slice()) })?;
+        let msg = Message::de(&buf[28..])?;
+        dbg!(&msg);
         match msg {
-            Message::Request(request) => match request {
-                Request::Ping => {
-                    let resp = Response::Pong.into_message();
-                    sock.send_to(&resp.se()?, sock_addr).await?;
-                }
-                _ => (),
-            },
+            Message::Request(_) => (),
             Message::Response(response) => match response {
                 Response::Addr { peer, addr } => {
                     let resp = Response::Complete.into_message();
-                    sock.send_to(&resp.se()?, sock_addr).await?;
-                    return Ok((local_addr, peer, addr));
+                    sock.send_to(&udp.packet(&resp.se()?), &sock_addr)?;
+                    return Ok((peer, addr));
                 }
                 _ => (),
             },
@@ -63,8 +91,13 @@ async fn get_peer_with_broker(broker: SocketAddr) -> Result<(SocketAddr, Peer, S
 }
 
 /// return true: success
-async fn handle_message(msg: WsMessage, tx: UnboundedSender<Message>, wg_tx: UnboundedSender<()>) -> Result<bool> {
+async fn handle_message(
+    msg: WsMessage,
+    tx: UnboundedSender<Message>,
+    wg_tx: UnboundedSender<()>,
+) -> Result<bool> {
     let msg = msg.try_into()?;
+    dbg!(&msg);
     match msg {
         Message::Request(request) => match request {
             Request::Ping => Response::Pong.into_message().send(&tx)?,
@@ -74,12 +107,12 @@ async fn handle_message(msg: WsMessage, tx: UnboundedSender<Message>, wg_tx: Unb
             Response::Broker(broker) => {
                 spawn(async move {
                     match get_peer_with_broker(broker).await {
-                        Ok((local_addr, peer, addr)) => {
-                            if let Err(e) = wg::set(local_addr, peer, addr, CONFIG.persistent_keepalive).await {
+                        Ok((peer, addr)) => {
+                            if let Err(e) = wg::set(peer, addr, CONFIG.persistent_keepalive).await {
                                 error!("wg set error: {e}");
                             }
                             wg_tx.unbounded_send(()).ok();
-                        },
+                        }
                         Err(e) => error!("get_peer_with_broker error: {e}"),
                     }
                 });
@@ -104,10 +137,7 @@ async fn send_ws_message(
 }
 
 fn punch_to(tx: &UnboundedSender<Message>) -> Result<()> {
-    let from = Peer {
-        network: CONFIG.network.to_string(),
-        id: CONFIG.id.to_string(),
-    };
+    let from = me();
     let to = Peer {
         network: CONFIG.network.to_string(),
         id: CONFIG.peer_id.to_string(),
@@ -138,12 +168,7 @@ async fn main() -> Result<()> {
 
     spawn(send_ws_message(write, rx));
 
-    Request::Connect(Peer {
-        network: CONFIG.network.to_string(),
-        id: CONFIG.id.to_string(),
-    })
-    .into_message()
-    .send(&tx)?;
+    Request::Connect(me()).into_message().send(&tx)?;
 
     if !CONFIG.listen {
         punch_to(&tx)?;
@@ -157,7 +182,9 @@ async fn main() -> Result<()> {
                 }
             },
             _ = wg_rx.next() => {
-                break;
+                if !CONFIG.listen {
+                    break;
+                }
             },
         }
     }

@@ -1,13 +1,12 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use anyhow::Result;
 use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
-use log::error;
+use log::{error, info};
 use tokio::{
     net::{TcpListener, TcpStream, UdpSocket},
     sync::Mutex,
-    time::sleep,
 };
 use tokio_tungstenite::{accept_async, tungstenite::Message as WsMessage, WebSocketStream};
 
@@ -20,40 +19,47 @@ use wgcp::{
 
 #[derive(Default, Debug)]
 struct NetWorks {
-    inner: HashMap<String, NetWork>,
+    peers: HashMap<PeerId, Peer>,
+    broker: Option<()>,
 }
 
 impl NetWorks {
-    fn get(&self, network: &str, peer_id: &str) -> Result<Option<&Peer>> {
-        let endpoint = self.inner.get(network).and_then(|i| i.peers.get(peer_id));
-        Ok(endpoint)
+    fn get(&self, peer_id: &PeerId) -> Option<&Peer> {
+        self.peers.get(peer_id)
     }
 
-    fn update(&mut self, network: &str, peer_id: &str, tx: UnboundedSender<Message>) -> Result<()> {
-        self.inner
-            .entry(network.to_string())
+    fn update(&mut self, peer_id: PeerId, tx: UnboundedSender<Message>) -> Result<()> {
+        self.peers
+            .entry(peer_id)
             .and_modify(|i| {
-                i.peers
-                    .entry(peer_id.to_string())
-                    .and_modify(|i| {
-                        i.tx = Some(tx.clone());
-                    })
-                    .or_insert(Peer {
-                        tx: Some(tx.clone()),
-                    });
+                i.tx = Some(tx.clone());
             })
-            .or_insert_with(|| {
-                let mut peers = HashMap::new();
-                peers.insert(peer_id.to_string(), Peer { tx: Some(tx) });
-                NetWork { peers }
-            });
+            .or_insert_with(|| Peer { tx: Some(tx) });
         Ok(())
     }
-}
 
-#[derive(Default, Debug)]
-struct NetWork {
-    peers: HashMap<String, Peer>,
+    fn punch_to(&mut self, from: &PeerId, to: &PeerId) -> Result<SocketAddr> {
+        let listen_addr: SocketAddr = CONFIG.broker.parse()?;
+        if self.broker.is_some() {
+            return Ok(listen_addr);
+        }
+
+        let mut task = HashMap::new();
+        task.insert(from.clone(), to.clone());
+        task.insert(to.clone(), from.clone());
+        let broker = Broker {
+            listen_addr,
+            task,
+            networks: HashMap::new(),
+        };
+        tokio::spawn(async move {
+            if let Err(e) = broker_handler(broker).await {
+                error!("broker error: {e}");
+            }
+        });
+        self.broker = Some(());
+        Ok(listen_addr)
+    }
 }
 
 #[derive(Debug)]
@@ -78,29 +84,26 @@ async fn broker_handler(mut broker: Broker) -> Result<()> {
                 Request::Connect(peer) => {
                     broker.networks.insert(peer.clone(), addr);
                     match broker.task.get(&peer) {
-                        Some(remote_peer_id) => {
-                            match broker.networks.get(remote_peer_id) {
-                                Some(remote_addr) => {
-                                    let resp = Response::Addr {
-                                        peer: remote_peer_id.clone(),
-                                        addr: *remote_addr,
-                                    }
-                                    .into_message();
-                                    sock.send_to(&resp.se()?, addr).await?;
-                                    let remote_resp = Response::Addr {
-                                        peer: peer.clone(),
-                                        addr,
-                                    }
-                                    .into_message();
-                                    sock.send_to(&remote_resp.se()?, remote_addr).await?;
+                        Some(remote_peer_id) => match broker.networks.get(remote_peer_id) {
+                            Some(remote_addr) => {
+                                let resp = Response::Addr {
+                                    peer: remote_peer_id.clone(),
+                                    addr: *remote_addr,
                                 }
-                                None => {
-                                    let resp = Response::Wait.into_message();
-                                    sock.send_to(&resp.se()?, addr).await?;
-                                    //tokio::spawn(send_ping(sock.clone(), addr));
+                                .into_message();
+                                sock.send_to(&resp.se()?, addr).await?;
+                                let remote_resp = Response::Addr {
+                                    peer: peer.clone(),
+                                    addr,
                                 }
+                                .into_message();
+                                sock.send_to(&remote_resp.se()?, remote_addr).await?;
                             }
-                        }
+                            None => {
+                                let resp = Response::Wait.into_message();
+                                sock.send_to(&resp.se()?, addr).await?;
+                            }
+                        },
                         None => {
                             let resp = MessageError::UnSupportedMessage.into_message();
                             sock.send_to(&resp.se()?, addr).await?;
@@ -123,22 +126,13 @@ async fn broker_handler(mut broker: Broker) -> Result<()> {
                 },
             },
             Message::Response(response) => match response {
-                Response::Complete => {
-                    sleep(Duration::from_secs(60)).await;
-                    break;
-                }
+                Response::Complete => (),
                 _ => (),
             },
             Message::Err(e) => error!("client error: {e:?}"),
         }
     }
     Ok(())
-}
-
-async fn broker_listen(broker: Broker) {
-    if let Err(e) = broker_handler(broker).await {
-        error!("broker error: {e}");
-    }
 }
 
 struct Broker {
@@ -160,30 +154,21 @@ async fn handle_message(
             Request::Ping => Response::Pong.into_message().send(&tx)?,
             Request::Connect(peer) => {
                 let mut n = networks.lock().await;
-                n.update(&peer.network, &peer.id, tx.clone())?;
+                n.update(peer, tx.clone())?;
                 Response::Connected.into_message().send(&tx)?;
             }
             Request::PunchTo { from, to } => {
-                let n = networks.lock().await;
-                let remote_peer = n.get(&to.network, &to.id)?;
-                match remote_peer.and_then(|i| i.tx.as_ref()) {
+                let mut n = networks.lock().await;
+                let listen_addr = n.punch_to(&from, &to)?;
+                match n.get(&to).and_then(|i| i.tx.as_ref()) {
                     Some(remote_tx) => {
-                        let listen_addr: SocketAddr = CONFIG.broker.parse()?;
-                        let mut task = HashMap::new();
-                        task.insert(from.clone(), to.clone());
-                        task.insert(to, from);
-                        let broker = Broker {
-                            listen_addr,
-                            task,
-                            networks: HashMap::new(),
-                        };
-                        tokio::spawn(broker_listen(broker));
+                        info!("ws punch from {from:?} to {to:?}");
                         Response::Broker(listen_addr).into_message().send(&tx)?;
                         Response::Broker(listen_addr)
                             .into_message()
                             .send(remote_tx)?;
                     }
-                    None => MessageError::PeerOffline.into_message().send(&tx)?,
+                    None => Response::Wait.into_message().send(&tx)?,
                 }
             }
         },
@@ -219,12 +204,6 @@ async fn handle_connection(networks: Arc<Mutex<NetWorks>>, stream: TcpStream) ->
     Ok(())
 }
 
-async fn spawn_handler(networks: Arc<Mutex<NetWorks>>, stream: TcpStream) {
-    if let Err(e) = handle_connection(networks.clone(), stream).await {
-        error!("{e}");
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
@@ -237,10 +216,14 @@ async fn main() -> Result<()> {
     }
 
     let networks = Arc::new(Mutex::new(NetWorks::default()));
-
     let listener = TcpListener::bind(&CONFIG.listen_address).await?;
     while let Ok((stream, _)) = listener.accept().await {
-        tokio::spawn(spawn_handler(networks.clone(), stream));
+        let networks = networks.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_connection(networks.clone(), stream).await {
+                error!("{e}");
+            }
+        });
     }
     Ok(())
 }
