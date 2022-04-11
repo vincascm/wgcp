@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use ulid::{serde::ulid_as_u128, Ulid};
 
 use super::{Message, Peer};
 
@@ -6,7 +7,15 @@ use super::{Message, Peer};
 pub enum Request {
     Ping,
     Connect(Peer),
-    PunchTo { from: Peer, to: Peer },
+    PunchTo {
+        from: Peer,
+        to: Peer,
+    },
+    ConnectBroker {
+        #[serde(with = "ulid_as_u128")]
+        task_id: Ulid,
+        peer: Peer,
+    },
 }
 
 impl Request {

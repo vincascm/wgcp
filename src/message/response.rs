@@ -1,17 +1,30 @@
 use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
+use ulid::{serde::ulid_as_u128, Ulid};
 
 use super::{Message, Peer};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Response {
     Pong,
     Connected,
-    Broker(SocketAddr),
+    Broker {
+        network: String,
+        #[serde(with = "ulid_as_u128")]
+        task_id: Ulid,
+        broker_addr: SocketAddr,
+    },
     Wait,
-    Addr { peer: Peer, addr: SocketAddr },
-    Complete,
+    Addr {
+        peer: Peer,
+        addr: SocketAddr,
+    },
+    Complete {
+        #[serde(with = "ulid_as_u128")]
+        task_id: Ulid,
+        peer: Peer,
+    },
 }
 
 impl Response {
