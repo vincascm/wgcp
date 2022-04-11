@@ -79,13 +79,26 @@ fn get_peer_with_broker(
     sock.send_to(&udp.packet(&req), &broker.into())?;
     let mut buf = vec![0u8; 1024];
     loop {
-        sock.recv_from(unsafe { transmute(buf.as_mut_slice()) })?;
+        let (_, sock_addr) = sock.recv_from(unsafe { transmute(buf.as_mut_slice()) })?;
         // skip ip header and udp header, total 28 bytes
         let msg = Message::de(&buf[28..])?;
         match msg {
             Message::Request(_) => (),
             Message::Response(response) => match response {
                 Response::Addr { peer, addr } => {
+                    let resp = Response::Wait.into_message();
+                    let resp = resp.se()?;
+                    sock.send_to(&udp.packet(&resp), &sock_addr)?;
+
+                    // send 3 ping packet to peer, avoid NAT release port map
+                    let udp = Udp::new(wg_port, addr.port());
+                    let resp = Request::Ping.into_message();
+                    let resp = resp.se()?;
+                    sock.send_to(&udp.packet(&resp), &addr.into())?;
+                    std::thread::sleep(Duration::from_secs(1));
+                    sock.send_to(&udp.packet(&resp), &addr.into())?;
+                    std::thread::sleep(Duration::from_secs(1));
+                    sock.send_to(&udp.packet(&resp), &addr.into())?;
                     return Ok((peer, addr));
                 }
                 _ => (),
