@@ -3,7 +3,7 @@ use std::fs::File;
 use anyhow::Result;
 use serde::Deserialize;
 
-use crate::message::Peer;
+use crate::message::Peer as MessagePeer;
 
 #[derive(Deserialize)]
 pub struct Config {
@@ -20,13 +20,20 @@ pub struct NetWork {
     /// WireGuard interface
     pub interface: String,
     pub id: String,
-    pub peer_id: String,
-    pub persistent_keepalive: u8,
+    pub peers: Vec<Peer>,
+}
+
+#[derive(Deserialize)]
+pub struct Peer {
+    #[serde(default)]
+    pub skip: bool,
+    pub id: String,
+    pub persistent_keepalive: Option<u8>,
 }
 
 impl NetWork {
-    pub fn me(&self) -> Peer {
-        Peer {
+    pub fn me(&self) -> MessagePeer {
+        MessagePeer {
             network: self.network.clone(),
             id: self.id.clone(),
         }

@@ -51,9 +51,9 @@ impl NetWorks {
         self.peers.get(peer_id)
     }
 
-    fn update(&mut self, peer_id: PeerId, tx: UnboundedSender<Message>) -> Result<()> {
+    fn update(&mut self, peer_id: &PeerId, tx: UnboundedSender<Message>) -> Result<()> {
         self.peers
-            .entry(peer_id)
+            .entry(peer_id.clone())
             .and_modify(|i| {
                 i.tx = Some(tx.clone());
             })
@@ -237,21 +237,27 @@ async fn handle_message(
             Request::Ping => Response::Pong.into_message().send(&tx)?,
             Request::Connect(peer) => {
                 let mut n = networks.lock().await;
-                n.update(peer, tx.clone())?;
+                n.update(&peer, tx.clone())?;
                 Response::Connected.into_message().send(&tx)?;
             }
             Request::PunchTo { from, to } => {
                 let mut n = networks.lock().await;
+                n.update(&from, tx.clone())?;
                 let (task_id, broker_addr) = n.punch_to(&from, &to).await?;
                 match n.get(&to).and_then(|i| i.tx.as_ref()) {
                     Some(remote_tx) => {
                         info!("ws punch from {from:?} to {to:?}");
                         let resp = Response::Broker {
-                            network: from.network.clone(),
                             task_id,
                             broker_addr,
+                            to,
                         };
-                        resp.clone().into_message().send(&tx)?;
+                        resp.into_message().send(&tx)?;
+                        let resp = Response::Broker {
+                            task_id,
+                            broker_addr,
+                            to: from,
+                        };
                         resp.into_message().send(remote_tx)?;
                     }
                     None => Response::Wait.into_message().send(&tx)?,
@@ -303,6 +309,7 @@ async fn handle_connection(networks: Arc<Mutex<NetWorks>>, stream: TcpStream) ->
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    std::env::set_var("RUST_LOG", "info");
     env_logger::init();
 
     if std::env::var("CONFIG_FILE").is_err() {

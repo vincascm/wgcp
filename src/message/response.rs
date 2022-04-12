@@ -10,10 +10,10 @@ pub enum Response {
     Pong,
     Connected,
     Broker {
-        network: String,
         #[serde(with = "ulid_as_u128")]
         task_id: Ulid,
         broker_addr: SocketAddr,
+        to: Peer,
     },
     Wait,
     Addr {

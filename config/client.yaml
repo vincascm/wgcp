@@ -5,5 +5,7 @@ network:
     network: default
     interface: wg0
     id: 2
-    peer_id: 3
-    persistent_keepalive: 25
+    peers:
+      -
+        id: 3
+        persistent_keepalive: 25
