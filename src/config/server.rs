@@ -9,6 +9,7 @@ pub struct Config {
     pub listen_address: String,
     #[serde(default = "Config::default_broker")]
     pub broker: String,
+    pub token: String,
 }
 
 impl Config {

@@ -9,6 +9,8 @@ use crate::message::Peer as MessagePeer;
 pub struct Config {
     pub server_address: String,
     pub listen: bool,
+    pub token: String,
+    pub keepalive: Option<u64>,
     pub network: Vec<NetWork>,
 }
 

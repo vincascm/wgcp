@@ -1,5 +1,7 @@
 server_address: ws://127.0.0.1:5465/
 listen: false
+token: xxx
+keepalive: 100
 network:
   -
     network: default

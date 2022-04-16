@@ -7,7 +7,7 @@ use log::{error, info};
 use once_cell::sync::Lazy;
 use tokio::{
     net::{TcpListener, TcpStream, UdpSocket},
-    select,
+    select, spawn,
     sync::Mutex,
     time::sleep,
 };
@@ -33,7 +33,7 @@ async fn create_broker() -> Result<Arc<Mutex<Broker>>> {
     };
     let broker = Arc::new(Mutex::new(broker));
     let broker_clone = broker.clone();
-    tokio::spawn(async move {
+    spawn(async move {
         if let Err(e) = broker_handler(broker_clone.clone()).await {
             error!("broker error: {e}");
         }
@@ -112,7 +112,12 @@ async fn broker_handler(broker: Arc<Mutex<Broker>>) -> Result<()> {
                             let resp = Response::Pong.into_message();
                             sock.send_to(&resp.se()?, addr).await?;
                         }
-                        Request::ConnectBroker {task_id, peer } => {
+                        Request::ConnectBroker {task_id, peer, token } => {
+                            if token != CONFIG.token {
+                                let resp = Response::AuthFailed.into_message();
+                                sock.send_to(&resp.se()?, addr).await?;
+                                continue;
+                            }
                             let mut b = broker.lock().await;
                             b.networks.insert(peer.clone(), addr);
                             match b.task.get(&task_id) {
@@ -145,7 +150,12 @@ async fn broker_handler(broker: Arc<Mutex<Broker>>) -> Result<()> {
                                 }
                             }
                         }
-                        Request::PunchTo { to, .. } => {
+                        Request::PunchTo { to, token, .. } => {
+                            if token != CONFIG.token {
+                                let resp = Response::AuthFailed.into_message();
+                                sock.send_to(&resp.se()?, addr).await?;
+                                continue;
+                            }
                             let broker = broker.lock().await;
                             match broker.networks.get(&to) {
                                 Some(addr) => {
@@ -235,12 +245,20 @@ async fn handle_message(
     match msg {
         Message::Request(request) => match request {
             Request::Ping => Response::Pong.into_message().send(&tx)?,
-            Request::Connect(peer) => {
-                let mut n = networks.lock().await;
-                n.update(&peer, tx.clone())?;
-                Response::Connected.into_message().send(&tx)?;
+            Request::Connect { peer, token } => {
+                if token == CONFIG.token {
+                    let mut n = networks.lock().await;
+                    n.update(&peer, tx.clone())?;
+                    Response::Connected.into_message().send(&tx)?;
+                } else {
+                    Response::AuthFailed.into_message().send(&tx)?;
+                }
             }
-            Request::PunchTo { from, to } => {
+            Request::PunchTo { from, to, token } => {
+                if token != CONFIG.token {
+                    Response::AuthFailed.into_message().send(&tx)?;
+                    return Ok(());
+                }
                 let mut n = networks.lock().await;
                 n.update(&from, tx.clone())?;
                 let (task_id, broker_addr) = n.punch_to(&from, &to).await?;
@@ -299,7 +317,7 @@ async fn handle_connection(networks: Arc<Mutex<NetWorks>>, stream: TcpStream) ->
     let (write, mut read) = ws.split();
     let (tx, rx) = unbounded();
 
-    tokio::spawn(send_ws_message(write, rx));
+    spawn(send_ws_message(write, rx));
 
     while let Some(msg) = read.next().await {
         handle_message(networks.clone(), msg?, tx.clone()).await?;
@@ -326,7 +344,7 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind(&CONFIG.listen_address).await?;
     while let Ok((stream, _)) = listener.accept().await {
         let networks = networks.clone();
-        tokio::spawn(async move {
+        spawn(async move {
             if let Err(e) = handle_connection(networks.clone(), stream).await {
                 error!("{e}");
             }

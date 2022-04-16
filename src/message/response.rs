@@ -25,6 +25,7 @@ pub enum Response {
         task_id: Ulid,
         peer: Peer,
     },
+    AuthFailed,
 }
 
 impl Response {

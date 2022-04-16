@@ -1,2 +1,3 @@
 listen_address: 127.0.0.1:5465
 broker: 0.0.0.0:5466
+token: xxx

@@ -48,6 +48,13 @@ impl Udp {
     }
 }
 
+async fn keepalive(tx: UnboundedSender<Message>) -> Result<()> {
+    loop {
+        Request::Ping.into_message().send(&tx)?;
+        sleep(Duration::from_secs(CONFIG.keepalive.unwrap_or(90))).await;
+    }
+}
+
 /// return local addr, peer id, peer addr
 fn get_peer_with_broker(
     network: &NetWork,
@@ -73,6 +80,7 @@ fn get_peer_with_broker(
     let req = Request::ConnectBroker {
         task_id,
         peer: network.me(),
+        token: CONFIG.token.clone(),
     }
     .into_message()
     .se()?;
@@ -124,6 +132,15 @@ async fn handle_message(
             _ => (),
         },
         Message::Response(response) => match response {
+            Response::Connected => {
+                if CONFIG.listen {
+                    spawn(async move {
+                        if let Err(e) = keepalive(tx).await {
+                            error!("keepalive {e}");
+                        }
+                    });
+                }
+            }
             Response::Broker {
                 task_id,
                 broker_addr,
@@ -226,11 +243,20 @@ async fn main() -> Result<()> {
     let (write, mut read) = ws.split();
     let (tx, rx) = unbounded();
 
-    spawn(send_ws_message(write, rx));
+    spawn(async move {
+        if let Err(e) = send_ws_message(write, rx).await {
+            error!("send websocket message: {e}");
+        };
+    });
 
     if CONFIG.listen {
         for n in &CONFIG.network {
-            Request::Connect(n.me()).into_message().send(&tx)?;
+            Request::Connect {
+                peer: n.me(),
+                token: CONFIG.token.clone(),
+            }
+            .into_message()
+            .send(&tx)?;
         }
     } else {
         for n in &CONFIG.network {
@@ -255,6 +281,7 @@ async fn main() -> Result<()> {
                 Request::PunchTo {
                     from: from.clone(),
                     to,
+                    token: CONFIG.token.clone(),
                 }
                 .into_message()
                 .send(&tx)?;
