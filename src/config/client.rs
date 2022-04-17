@@ -1,9 +1,8 @@
 use std::fs::File;
 
-use anyhow::Result;
 use serde::Deserialize;
 
-use crate::message::Peer as MessagePeer;
+use crate::{error::Result, message::Peer as MessagePeer};
 
 #[derive(Deserialize)]
 pub struct Config {

@@ -1,8 +1,9 @@
 use std::{net::SocketAddr, process::Command};
 
-use anyhow::{anyhow, Result};
-
-use crate::config::client::Peer;
+use crate::{
+    config::client::Peer,
+    error::{Error, Result},
+};
 
 pub fn get_listen_port(interface: &str) -> Result<u16> {
     let output = Command::new("wg")
@@ -14,7 +15,7 @@ pub fn get_listen_port(interface: &str) -> Result<u16> {
         let output = String::from_utf8_lossy(&output.stdout);
         Ok(output.trim().parse()?)
     } else {
-        Err(anyhow!("execute wg command failure"))
+        Err(Error::new("execute wg command failure"))
     }
 }
 
@@ -32,6 +33,6 @@ pub fn set(interface: &str, peer: &Peer, addr: SocketAddr) -> Result<()> {
     if status.success() {
         Ok(())
     } else {
-        Err(anyhow!("execute wg command failure"))
+        Err(Error::new("execute wg command failure"))
     }
 }

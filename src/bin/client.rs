@@ -4,7 +4,6 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{bail, Result};
 use bytes::BufMut;
 use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
@@ -19,6 +18,7 @@ use url::Url;
 
 use wgcp::{
     config::client::{Config, NetWork},
+    error::{Error, Result},
     message::{request::Request, response::Response, Message, Peer},
     socket_filter::broker_response_filter,
     wg,
@@ -65,7 +65,7 @@ fn get_peer_with_broker(
 
     let broker_ip: Ipv4Addr = match broker.ip() {
         IpAddr::V4(v) => v,
-        IpAddr::V6(_) => bail!("invalid broker ip, must be ipv4"),
+        IpAddr::V6(_) => return Err(Error::new("invalid broker ip, must be ipv4")),
     };
     let broker_port = broker.port();
     let wg_port = wg::get_listen_port(&network.interface)?;
@@ -211,34 +211,7 @@ async fn send_ws_message(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    std::env::set_var("RUST_LOG", "info");
-    env_logger::init();
-
-    if std::env::var("CONFIG_FILE").is_err() {
-        let filename = std::env::args()
-            .nth(1)
-            .unwrap_or_else(|| "config.yaml".to_owned());
-        std::env::set_var("CONFIG_FILE", filename);
-    }
-
-    for n in &CONFIG.network {
-        if !(n.network.len() <= 64 && n.id.len() <= 64) {
-            bail!("netork or id is too long in config");
-        }
-
-        for p in &n.peers {
-            if p.id.len() > 64 {
-                bail!("peer id is too long in config");
-            }
-            if p.persistent_keepalive.unwrap_or(25) > 25 {
-                warn!("persistent-keepalive is large than 25s, may result in NAT close rule map");
-            }
-        }
-    }
-
-    let server_address: Url = CONFIG.server_address.parse()?;
+async fn run(server_address: Url) -> Result<()> {
     let (ws, _) = connect_async(server_address).await?;
     let (write, mut read) = ws.split();
     let (tx, rx) = unbounded();
@@ -305,6 +278,48 @@ async fn main() -> Result<()> {
                 }
             },
         }
+    }
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    std::env::set_var("RUST_LOG", "info");
+    env_logger::init();
+
+    if std::env::var("CONFIG_FILE").is_err() {
+        let filename = std::env::args()
+            .nth(1)
+            .unwrap_or_else(|| "config.yaml".to_owned());
+        std::env::set_var("CONFIG_FILE", filename);
+    }
+
+    for n in &CONFIG.network {
+        if !(n.network.len() <= 64 && n.id.len() <= 64) {
+            return Err(Error::new("netork or id is too long in config"));
+        }
+
+        for p in &n.peers {
+            if p.id.len() > 64 {
+                return Err(Error::new("peer id is too long in config"));
+            }
+            if p.persistent_keepalive.unwrap_or(25) > 25 {
+                warn!("persistent-keepalive is large than 25s, may result in NAT close rule map");
+            }
+        }
+    }
+    let server_address: Url = CONFIG.server_address.parse()?;
+    loop {
+        let result = run(server_address.clone()).await;
+        if let Err(Error::Tungstenite(tokio_tungstenite::tungstenite::Error::Protocol(e))) = result
+        {
+            if e == tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake {
+                continue;
+            }
+        } else if let Err(e) = result {
+            error!("{e}");
+        }
+        break;
     }
     Ok(())
 }

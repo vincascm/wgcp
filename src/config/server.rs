@@ -1,7 +1,8 @@
 use std::fs::File;
 
-use anyhow::Result;
 use serde::Deserialize;
+
+use crate::error::Result;
 
 #[derive(Deserialize)]
 pub struct Config {

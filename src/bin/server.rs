@@ -1,6 +1,5 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
-use anyhow::{anyhow, Result};
 use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 use log::{error, info};
@@ -16,6 +15,7 @@ use ulid::Ulid;
 
 use wgcp::{
     config::server::Config,
+    error::{Error, Result},
     message::{
         error::Error as MessageError, request::Request, response::Response, Message, Peer as PeerId,
     },
@@ -219,7 +219,7 @@ impl Task {
         } else if peer_id == &self.to {
             Ok(&self.from)
         } else {
-            Err(anyhow!("current task has not this peer"))
+            Err(Error::new("current task has not this peer"))
         }
     }
 
