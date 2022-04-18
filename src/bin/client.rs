@@ -90,7 +90,6 @@ fn get_peer_with_broker(
         let (_, sock_addr) = sock.recv_from(unsafe { transmute(buf.as_mut_slice()) })?;
         // skip ip header and udp header, total 28 bytes
         let msg = Message::de(&buf[28..])?;
-        dbg!(&msg);
         match msg {
             Message::Request(_) => (),
             Message::Response(response) => match response {
@@ -125,7 +124,6 @@ async fn handle_message(
     wg_tx: UnboundedSender<()>,
 ) -> Result<()> {
     let msg = msg.try_into()?;
-    dbg!(&msg);
     match msg {
         Message::Request(request) => match request {
             Request::Ping => Response::Pong.into_message().send(&tx)?,
