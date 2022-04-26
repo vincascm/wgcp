@@ -328,12 +328,6 @@ async fn main() -> Result<()> {
                     },
                     x => error!("websocket error: {x}"),
                 }
-            } else if let Error::StdIo(e) = e {
-                let k = e.kind();
-                if k == IoErr::ConnectionReset || k == IoErr::TimedOut {
-                    error!("tcp {k}, will reconnect");
-                    continue;
-                }
             } else {
                 error!("{e}");
             }
