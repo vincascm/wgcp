@@ -315,8 +315,9 @@ async fn main() -> Result<()> {
                     continue;
                 }
             } else if let Error::StdIo(e) = e {
-                if e.kind() == std::io::ErrorKind::ConnectionReset {
-                    error!("tcp reset, will reconnect");
+                let k = e.kind();
+                if k == std::io::ErrorKind::ConnectionReset || k == std::io::ErrorKind::TimedOut {
+                    error!("tcp {k}, will reconnect");
                     continue;
                 }
             } else {
