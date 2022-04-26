@@ -308,14 +308,20 @@ async fn main() -> Result<()> {
     }
     let server_address: Url = CONFIG.server_address.parse()?;
     loop {
-        let result = run(server_address.clone()).await;
-        if let Err(Error::Tungstenite(tokio_tungstenite::tungstenite::Error::Protocol(e))) = result
-        {
-            if e == tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake {
-                continue;
+        if let Err(e) = run(server_address.clone()).await {
+            if let Error::Tungstenite(tokio_tungstenite::tungstenite::Error::Protocol(e)) = e {
+                if e == tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake {
+                    error!("websocket reset, will reconnect");
+                    continue;
+                }
+            } else if let Error::StdIo(e) = e {
+                if e.kind() == std::io::ErrorKind::ConnectionReset {
+                    error!("tcp reset, will reconnect");
+                    continue;
+                }
+            } else {
+                error!("{e}");
             }
-        } else if let Err(e) = result {
-            error!("{e}");
         }
         break;
     }
