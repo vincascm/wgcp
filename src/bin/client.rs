@@ -307,16 +307,30 @@ async fn main() -> Result<()> {
         }
     }
     let server_address: Url = CONFIG.server_address.parse()?;
+    use std::io::ErrorKind as IoErr;
+    use tokio_tungstenite::tungstenite::Error as WsErr;
     loop {
         if let Err(e) = run(server_address.clone()).await {
-            if let Error::Tungstenite(tokio_tungstenite::tungstenite::Error::Protocol(e)) = e {
-                if e == tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake {
-                    error!("websocket reset, will reconnect");
-                    continue;
+            if let Error::Tungstenite(e) = e {
+                match e {
+                    WsErr::Protocol(e) => {
+                        if e == tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake {
+                            error!("websocket reset, will reconnect");
+                            continue;
+                        }
+                    },
+                    WsErr::Io(e) => {
+                        let k = e.kind();
+                        if k == IoErr::ConnectionReset || k == IoErr::TimedOut {
+                            error!("tcp {k}, will reconnect");
+                            continue;
+                        }
+                    },
+                    x => error!("websocket error: {x}"),
                 }
             } else if let Error::StdIo(e) = e {
                 let k = e.kind();
-                if k == std::io::ErrorKind::ConnectionReset || k == std::io::ErrorKind::TimedOut {
+                if k == IoErr::ConnectionReset || k == IoErr::TimedOut {
                     error!("tcp {k}, will reconnect");
                     continue;
                 }
