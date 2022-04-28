@@ -123,7 +123,13 @@ async fn handle_message(
     tx: UnboundedSender<Message>,
     wg_tx: UnboundedSender<()>,
 ) -> Result<()> {
-    let msg = msg.try_into()?;
+    let msg = match msg.try_into() {
+        Ok(v) => v,
+        Err(e) => {
+            error!("deserialize command failure: {e}");
+            return Ok(());
+        }
+    };
     match msg {
         Message::Request(request) => match request {
             Request::Ping => Response::Pong.into_message().send(&tx)?,
