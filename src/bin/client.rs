@@ -177,14 +177,17 @@ async fn handle_message(
                         }
                         Err(e) => error!("get_peer_with_broker error: {e}"),
                     }
-                    wg_tx.unbounded_send(()).ok();
-                    Response::Complete {
+                    let r = Response::Complete {
                         task_id,
                         peer: network.me(),
                     }
                     .into_message()
-                    .send(&tx)
-                    .ok();
+                    .send(&tx);
+                    match r {
+                        Ok(_) => info!("notify server task {task_id} complete"),
+                        Err(e) => error!("send Complete message error: {e}"),
+                    }
+                    wg_tx.unbounded_send(()).ok();
                 });
             }
             Response::Wait => {
@@ -329,6 +332,12 @@ async fn main() -> Result<()> {
                         let k = e.kind();
                         if k == IoErr::ConnectionReset || k == IoErr::TimedOut {
                             error!("tcp {k}, will reconnect");
+                            continue;
+                        }
+                    },
+                    WsErr::Http(resp) => {
+                        if resp.status() == http::StatusCode::BAD_GATEWAY {
+                            error!("server is offline, will reconnect");
                             continue;
                         }
                     },

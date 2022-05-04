@@ -199,6 +199,7 @@ impl Broker {
             is_complete = i.complete(peer_id);
         });
         if is_complete {
+            info!("task {task_id} complete");
             self.task.remove(&task_id);
             self.networks.remove(peer_id);
         }
