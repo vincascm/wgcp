@@ -344,9 +344,11 @@ async fn main() -> Result<()> {
                     x => error!("websocket error: {x}"),
                 }
             } else {
-                error!("{e}");
+                error!("not tungstenite {e}");
+                continue;
             }
         }
+        info!("normal exit listen");
         break;
     }
     Ok(())
