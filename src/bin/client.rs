@@ -91,24 +91,37 @@ fn get_peer_with_broker(
         // skip ip header and udp header, total 28 bytes
         let msg = Message::de(&buf[28..])?;
         match msg {
-            Message::Request(_) => (),
+            Message::Request(req) => match req {
+                Request::HelloPeer => {
+                    let resp = Response::HelloPeer(network.me()).into_message();
+                    let resp = resp.se()?;
+                    sock.send_to(&udp.packet(&resp), &sock_addr)?;
+                },
+                _ => (),
+            },
             Message::Response(response) => match response {
-                Response::Addr { peer, addr } => {
+                Response::Addr { addr, .. } => {
+                    // reply broker
                     let resp = Response::Wait.into_message();
                     let resp = resp.se()?;
                     sock.send_to(&udp.packet(&resp), &sock_addr)?;
 
-                    // send 3 ping packet to peer, avoid NAT release port map
-                    let udp = Udp::new(wg_port, addr.port());
-                    let resp = Request::Ping.into_message();
-                    let resp = resp.se()?;
-                    sock.send_to(&udp.packet(&resp), &addr.into())?;
-                    std::thread::sleep(Duration::from_secs(1));
-                    sock.send_to(&udp.packet(&resp), &addr.into())?;
-                    std::thread::sleep(Duration::from_secs(1));
-                    sock.send_to(&udp.packet(&resp), &addr.into())?;
-                    return Ok((peer, addr));
+                    // send request to peer
+                    for port in addr.port() ..= addr.port() + 10 {
+                        let udp = Udp::new(wg_port, port);
+                        let resp = Request::HelloPeer.into_message();
+                        let resp = resp.se()?;
+                        sock.send_to(&udp.packet(&resp), &sock_addr)?;
+                        sock.send_to(&udp.packet(&resp), &sock_addr)?;
+                        sock.send_to(&udp.packet(&resp), &sock_addr)?;
+                    }
                 }
+                Response::HelloPeer(peer) => {
+                    match sock_addr.as_socket() {
+                        Some(addr) => return Ok((peer, addr)),
+                        None => (),
+                    }
+                },
                 _ => (),
             },
             Message::Close => (),

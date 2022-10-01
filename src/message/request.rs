@@ -21,6 +21,7 @@ pub enum Request {
         peer: Peer,
         token: String,
     },
+    HelloPeer,
 }
 
 impl Request {

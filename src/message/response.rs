@@ -26,6 +26,7 @@ pub enum Response {
         peer: Peer,
     },
     AuthFailed,
+    HelloPeer(Peer),
 }
 
 impl Response {
