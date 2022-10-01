@@ -120,6 +120,7 @@ async fn broker_handler(broker: Arc<Mutex<Broker>>) -> Result<()> {
                             }
                             let mut b = broker.lock().await;
                             b.networks.insert(peer.clone(), addr);
+                            info!("{peer:?} connected to broker, addr: {addr:?}");
                             match b.task.get(&task_id) {
                                 Some(task) => {
                                     let remote_peer_id = task.remote_peer_id(&peer)?;
@@ -150,7 +151,7 @@ async fn broker_handler(broker: Arc<Mutex<Broker>>) -> Result<()> {
                                 }
                             }
                         }
-                        Request::PunchTo { to, token, .. } => {
+                        Request::PunchTo { from, to, token } => {
                             if token != CONFIG.token {
                                 let resp = Response::AuthFailed.into_message();
                                 sock.send_to(&resp.se()?, addr).await?;
@@ -159,6 +160,7 @@ async fn broker_handler(broker: Arc<Mutex<Broker>>) -> Result<()> {
                             let broker = broker.lock().await;
                             match broker.networks.get(&to) {
                                 Some(addr) => {
+                                    info!("broker response to addr: {addr:?}");
                                     let resp = Response::Addr {
                                         peer: to,
                                         addr: *addr,
@@ -167,6 +169,7 @@ async fn broker_handler(broker: Arc<Mutex<Broker>>) -> Result<()> {
                                     sock.send_to(&resp.se()?, addr).await?;
                                 }
                                 None => {
+                                    info!("punch from {from:?} to {to:?}, dest is offline");
                                     let resp = MessageError::PeerOffline.into_message();
                                     sock.send_to(&resp.se()?, addr).await?;
                                 }

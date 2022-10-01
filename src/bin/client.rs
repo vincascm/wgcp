@@ -101,6 +101,7 @@ fn get_peer_with_broker(
             },
             Message::Response(response) => match response {
                 Response::Addr { peer, addr } => {
+                    info!("connected to broker, and get peer addr: {addr:?}");
                     // reply broker
                     let resp = Response::Wait.into_message();
                     let resp = resp.se()?;
@@ -114,7 +115,9 @@ fn get_peer_with_broker(
                         .and_then(|i| i.nat_type)
                         .unwrap_or_default();
                     if nat_type == 4 {
-                        for port in addr.port() ..= addr.port() + 10 {
+                        let port = addr.port();
+                        info!("peer nat type is {nat_type}, and port is: {port} .. {port}+10");
+                        for port in port ..= port + 10 {
                             let udp = Udp::new(wg_port, port);
                             let resp = Request::HelloPeer.into_message();
                             let resp = resp.se()?;
@@ -123,7 +126,9 @@ fn get_peer_with_broker(
                             sock.send_to(&udp.packet(&resp), &sock_addr)?;
                         }
                     } else {
-                        let udp = Udp::new(wg_port, addr.port());
+                        let port = addr.port();
+                        info!("peer nat type is {nat_type}, and port is: {port}");
+                        let udp = Udp::new(wg_port, port);
                         let resp = Request::HelloPeer.into_message();
                         let resp = resp.se()?;
                         sock.send_to(&udp.packet(&resp), &sock_addr)?;
