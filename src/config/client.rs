@@ -28,6 +28,7 @@ pub struct NetWork {
 pub struct Peer {
     #[serde(default)]
     pub skip: bool,
+    pub nat_type: Option<u8>,
     pub id: String,
     pub persistent_keepalive: Option<u8>,
 }
