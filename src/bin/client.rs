@@ -55,6 +55,35 @@ async fn keepalive(tx: UnboundedSender<Message>) -> Result<()> {
     }
 }
 
+/*
+fn udp_connect_to_peer(rx: std::sync::mpsc::Receiver<Message>, nat_type: u8, wg_port: u16, peer_port: u16, udp_sock: u8, ) -> Result<()> {
+    loop {
+        if nat_type == 4 {
+            let port = addr.port();
+            info!("peer nat type is {nat_type}, and port is: {port} .. {port}+10");
+            for port in port ..= port + 10 {
+                let udp = Udp::new(wg_port, port);
+                let resp = Request::HelloPeer.into_message();
+                let resp = resp.se()?;
+                sock.send_to(&udp.packet(&resp), &sock_addr)?;
+                sock.send_to(&udp.packet(&resp), &sock_addr)?;
+                sock.send_to(&udp.packet(&resp), &sock_addr)?;
+            }
+        } else {
+            let port = addr.port();
+            info!("peer nat type is {nat_type}, and port is: {port}");
+            let udp = Udp::new(wg_port, port);
+            let resp = Request::HelloPeer.into_message();
+            let resp = resp.se()?;
+            sock.send_to(&udp.packet(&resp), &sock_addr)?;
+            sock.send_to(&udp.packet(&resp), &sock_addr)?;
+            sock.send_to(&udp.packet(&resp), &sock_addr)?;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+*/
+
 /// return local addr, peer id, peer addr
 fn get_peer_with_broker(
     network: &NetWork,
@@ -89,7 +118,13 @@ fn get_peer_with_broker(
     loop {
         let (_, sock_addr) = sock.recv_from(unsafe { transmute(buf.as_mut_slice()) })?;
         // skip ip header and udp header, total 28 bytes
-        let msg = Message::de(&buf[28..])?;
+        let msg = match Message::de(&buf[28..]) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("{e}");
+                continue;
+            }
+        };
         match msg {
             Message::Request(req) => match req {
                 Request::HelloPeer => {
@@ -116,24 +151,26 @@ fn get_peer_with_broker(
                         .unwrap_or_default();
                     if nat_type == 4 {
                         let port = addr.port();
+                        let addr = addr.into();
                         info!("peer nat type is {nat_type}, and port is: {port} .. {port}+10");
                         for port in port ..= port + 10 {
                             let udp = Udp::new(wg_port, port);
                             let resp = Request::HelloPeer.into_message();
                             let resp = resp.se()?;
-                            sock.send_to(&udp.packet(&resp), &sock_addr)?;
-                            sock.send_to(&udp.packet(&resp), &sock_addr)?;
-                            sock.send_to(&udp.packet(&resp), &sock_addr)?;
+                            sock.send_to(&udp.packet(&resp), &addr)?;
+                            sock.send_to(&udp.packet(&resp), &addr)?;
+                            sock.send_to(&udp.packet(&resp), &addr)?;
                         }
                     } else {
                         let port = addr.port();
+                        let addr = addr.into();
                         info!("peer nat type is {nat_type}, and port is: {port}");
                         let udp = Udp::new(wg_port, port);
                         let resp = Request::HelloPeer.into_message();
                         let resp = resp.se()?;
-                        sock.send_to(&udp.packet(&resp), &sock_addr)?;
-                        sock.send_to(&udp.packet(&resp), &sock_addr)?;
-                        sock.send_to(&udp.packet(&resp), &sock_addr)?;
+                        sock.send_to(&udp.packet(&resp), &addr)?;
+                        sock.send_to(&udp.packet(&resp), &addr)?;
+                        sock.send_to(&udp.packet(&resp), &addr)?;
                     }
                 }
                 Response::HelloPeer(peer) => {
